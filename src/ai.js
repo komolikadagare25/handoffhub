@@ -86,7 +86,13 @@ async function generateRecap(rawNotes, { title, participants = [] }) {
 Today's date is ${today()}. Meeting: "${title}". Known participants: ${JSON.stringify(participants)}.
 Return ONLY JSON in this exact shape:
 {"summary": string (2-4 sentences), "decisions": string[], "action_items": [{"title": string, "owner": string (one of the participants if possible, else ""), "due_date": "YYYY-MM-DD" or null}]}
-Resolve relative dates (e.g. "by Friday") using today's date. Do not invent items that are not in the text.
+Rules:
+- Ignore filler words and small talk; write the summary as a clean professional recap, not a copy of the first lines.
+- "decisions" = only FIRM decisions. Tentative ideas ("maybe", "probably", "let's wait") are NOT decisions; mention them in the summary instead.
+- One action item per task, with a short imperative title (e.g. "Fix API 500 errors"). Split sentences that contain several tasks.
+- "owner" = the person responsible, even if they are not in the participants list; "" if nobody is named.
+- Resolve relative dates ("by Friday", "18 November") using today's date; use null if no deadline is stated.
+- Do not invent items that are not in the text.
 
 RAW INPUT:
 """
@@ -109,33 +115,73 @@ ${rawNotes.slice(0, 12000)}
     return { ...result, ai_used: true, fallback: false };
   } catch (e) {
     logger.warn({ event: 'recap_fallback', reason: e.message });
-    return { ...heuristicRecap(rawNotes, participants), ai_used: false, fallback: true };
+    return { ...heuristicRecap(rawNotes, participants), ai_used: false, fallback: true, ai_error: String(e.message).slice(0, 200) };
   }
 }
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const iso = (d) => d.toISOString().slice(0, 10);
 function nextWeekday(name) {
   const target = WEEKDAYS.indexOf(name.toLowerCase());
   const d = new Date();
   let diff = (target - d.getDay() + 7) % 7;
   if (diff === 0) diff = 7;
   d.setDate(d.getDate() + diff);
-  return d.toISOString().slice(0, 10);
+  return iso(d);
 }
+function parseDue(sentence) {
+  const isoM = sentence.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (isoM && isDate(isoM[1])) return isoM[1];
+  const m = sentence.match(new RegExp('\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(' + MONTHS.join('|') + ')\\b', 'i'));
+  if (m) {
+    const now = new Date();
+    let d = new Date(Date.UTC(now.getUTCFullYear(), MONTHS.indexOf(m[2].toLowerCase()), Number(m[1])));
+    if (d < now) d = new Date(Date.UTC(now.getUTCFullYear() + 1, d.getUTCMonth(), d.getUTCDate()));
+    return iso(d);
+  }
+  const wd = sentence.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i);
+  if (wd) return nextWeekday(wd[1]);
+  if (/\btoday\b/i.test(sentence)) return iso(new Date());
+  return null;
+}
+
+const NOT_NAMES = new Set('also okay one maybe coming oh please marketing testing the we they this that it but so and finance he she i then now next after before first second however meeting decisions summary action'.split(' '));
+function findOwner(sentence, participants) {
+  const known = participants.find((p) => new RegExp('\\b' + p.split(' ')[0] + '\\b', 'i').test(sentence));
+  if (known) return known;
+  const re = /\b([A-Z][a-z]{2,})\b(?=\s+(?:will|needs? to|should|has to|must|is going to|to)\b)/g;
+  let m;
+  while ((m = re.exec(sentence))) if (!NOT_NAMES.has(m[1].toLowerCase())) return m[1];
+  return '';
+}
+
+const TENTATIVE = /\b(maybe|probably|not sure|might|let's not|not finali[sz]ed|i think)\b/i;
+const ACTION_VERB = /\b(will|needs? to|should|has to|must|is going to)\b/i;
+const PASSIVE_TODO = /\b(should|must|need(?:s)? to)(?: also)? be (fixed|done|completed|resolved|reviewed)\b/i;
+const DECISION = /\b(decid\w*|agreed?|approved|finali[sz]ed|resolved|not necessary|consider it in version|will not|won't)\b/i;
 
 // Deterministic fallback so the app keeps working when the AI is down.
 function heuristicRecap(raw, participants) {
-  const lines = raw.split(/\n+/).map((l) => l.replace(/^[-*•\d.)\s]+/, '').trim()).filter(Boolean);
-  const sentences = raw.replace(/\n+/g, ' ').split(/(?<=[.!?])\s+/).filter(Boolean);
-  const decisions = lines.filter((l) => /\b(decid|agreed|approved|finali[sz]ed|will go with|resolved)\w*/i.test(l));
-  const actionLines = lines.filter((l) => /\b(action|todo|to-do|will|needs? to|should|must|please|follow up)\b/i.test(l) && !decisions.includes(l));
-  const action_items = actionLines.map((l) => {
-    const owner = participants.find((p) => new RegExp(`\\b${p.split(' ')[0]}\\b`, 'i').test(l)) || '';
-    const iso = l.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-    const wd = l.match(/\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i);
-    return { title: l.slice(0, 200), owner, due_date: iso && isDate(iso[1]) ? iso[1] : wd ? nextWeekday(wd[1]) : null };
-  });
-  return { summary: sentences.slice(0, 2).join(' ') || 'No summary available.', decisions, action_items };
+  const clean = raw
+    .replace(/^#+\s.*$/gm, ' ')
+    .replace(/\b(umm+|uh+|you know|okay,? so|honestly|basically)\b[,]?\s*/gi, '')
+    .replace(/\s+/g, ' ');
+  const sentences = clean.split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter((x) => x.length > 12);
+
+  const decisions = sentences.filter((x) => DECISION.test(x) && !TENTATIVE.test(x));
+  const actions = [];
+  for (const x of sentences) {
+    if (decisions.includes(x)) continue;
+    const owner = findOwner(x, participants);
+    if ((owner && ACTION_VERB.test(x)) || PASSIVE_TODO.test(x)) {
+      actions.push({ title: x.replace(/^(and|also|but|so|then)\s+/i, '').slice(0, 160), owner, due_date: parseDue(x) });
+    }
+  }
+  const KEY = /\b(delay\w*|launch|decid\w*|approved|budget|issue|bug|blocker|deadline|release|plan\w*)\b/i;
+  const pick = sentences.filter((x) => KEY.test(x) && !/\b(late|let's start|join)\b/i.test(x)).slice(0, 3);
+  const summary = (pick.length ? pick : sentences.slice(0, 3)).join(' ');
+  return { summary: summary || 'No summary available.', decisions, action_items: actions };
 }
 
 // ---------- 2. Catch-up brief ----------

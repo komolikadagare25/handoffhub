@@ -122,7 +122,7 @@ async function viewMeeting(id) {
   guarded($('#recap'), async () => {
     toast('Generating recap…', 15000);
     const r = await api(`/meetings/${id}/recap`, { method: 'POST', body: { notes: $('#notes').value } });
-    toast(r.fallback ? 'AI unavailable — used rule-based fallback' : `Recap ready · ${r.created_item_ids.length} items added`);
+    toast(r.fallback ? `AI unavailable (${r.ai_error || 'unknown'}) — used rule-based fallback` : `Recap ready · ${r.created_item_ids.length} items added`, r.fallback ? 15000 : 3200);
     go('meeting', id);
   });
   guarded($('#i-add'), async () => {
