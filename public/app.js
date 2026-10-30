@@ -216,8 +216,8 @@ async function viewDashboard() {
   const it = s.items;
   const stat = (n, label, cls, target) => `<button class="stat ${cls}" data-go="${target}"><span class="n">${n}</span><span class="l">${label}</span></button>`;
   const maxOpen = Math.max(1, ...s.workload.map((w) => w.open));
-  app.innerHTML = `<h2>Dashboard</h2>
-  <div class="cta"><div><strong>Someone going on leave?</strong><br><span class="muted">One click builds a handover document covering all their open items, risks, linked docs and who to ask.</span></div><button id="d-pack">📄 Create handover pack</button></div>
+  app.innerHTML = `<div class="hero"><div><h2>Keep DIGIPLUS IT work moving when people are away</h2>
+    <p>Someone going on leave? Generate a handover pack with every open item, the risks, linked docs and who to ask.</p></div><button id="d-pack">Create handover pack</button></div>
   <div class="stats">
     ${stat(it.active, `Open (${it.in_progress} in progress)`, '', 'board')}
     ${stat(it.overdue, 'Overdue', it.overdue ? 'bad' : '', 'radar')}

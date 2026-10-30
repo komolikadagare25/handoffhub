@@ -1,12 +1,12 @@
-:root{--bg:#f6f7fb;--card:#fff;--ink:#1d2433;--muted:#667085;--line:#e4e7ee;--brand:#4f46e5;--brand-ink:#fff;--ok:#12805c;--warn:#b54708;--bad:#b42318;--chip:#eef0ff}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1320;--card:#181d2e;--ink:#e8ebf5;--muted:#9aa3b8;--line:#2a3148;--brand:#7c83ff;--brand-ink:#0f1320;--ok:#4cd6a0;--warn:#f5a45b;--bad:#ff7b72;--chip:#252b45}}
+:root{/* DIGIPLUS IT theme: change these to match the logo */--hdr:#0a2540;--accent:#00c2d1;--bg:#f2f6fb;--card:#fff;--ink:#0f2238;--muted:#5b6b80;--line:#dce5f0;--brand:#1565ff;--brand-ink:#fff;--ok:#0e8a5f;--warn:#b45309;--bad:#c0262d;--chip:#e6eefb}
+@media (prefers-color-scheme:dark){:root{--hdr:#07111f;--accent:#22d3ee;--bg:#0a1628;--card:#112240;--ink:#e6eef8;--muted:#9fb0c7;--line:#1f3558;--brand:#5b9bff;--brand-ink:#06121f;--ok:#4cd6a0;--warn:#f5a45b;--bad:#ff7b72;--chip:#172b4d}}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
-header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-.brand{font-weight:700;font-size:18px}.brand span{font-weight:400;color:var(--muted);font-size:13px;margin-left:8px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:12px 20px;background:var(--hdr);border-bottom:2px solid var(--accent);position:sticky;top:0;z-index:5}
+.brand{display:flex;align-items:center;gap:10px;color:#fff;line-height:1.15}.brand svg{width:34px;height:34px;flex:none}.brand strong{display:block;font-size:18px}.brand small{display:block;color:#9fc6d9;font-size:12px;letter-spacing:.02em}
 nav{display:flex;gap:4px;flex-wrap:wrap}
-nav button{background:none;border:0;padding:8px 14px;border-radius:8px;color:var(--muted);font:inherit;cursor:pointer}
-nav button.active{background:var(--chip);color:var(--brand);font-weight:600}
+nav button{background:none;border:0;padding:8px 14px;border-radius:8px;color:#b9c8da;font:inherit;font-weight:500;cursor:pointer}nav button:hover{color:#fff}
+nav button.active{background:rgba(255,255,255,.12);color:#fff;font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
 main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
 h2{margin:0 0 12px;font-size:20px}h3{margin:18px 0 8px;font-size:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
@@ -71,3 +71,15 @@ a{color:var(--brand)}
 .rr input[type=text],.rr input:not([type]),.rr input[type=date]{padding:5px 6px}
 .rr td{padding:4px 4px}
 .tabsw{display:inline-flex;gap:4px;margin:4px 0 10px}
+
+/* ---- DIGIPLUS IT branding ---- */
+:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+header :focus-visible{outline-color:var(--accent)}
+.hero{position:relative;overflow:hidden;background:var(--hdr);color:#fff;border-radius:14px;padding:24px 26px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px 28px;align-items:center;justify-content:space-between;border:1px solid var(--line)}
+.hero::after{content:"";position:absolute;right:210px;top:50%;transform:translateY(-50%);width:150px;height:150px;opacity:.14;pointer-events:none;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M38 0h24v38h38v24H62v38H38V62H0V38h38z' fill='%2300C2D1'/%3E%3C/svg%3E") center/contain no-repeat}
+.hero>*{position:relative;z-index:1}
+.hero h2{color:#fff;font-size:22px;margin:0 0 6px;max-width:30ch}
+.hero p{margin:0;color:#b9c8da;max-width:52ch}
+.hero button{background:var(--accent);color:#04202a;padding:10px 18px}
+footer{text-align:center;color:var(--muted);font-size:13px;padding:0 16px 28px}
+footer b{color:var(--ink)}
