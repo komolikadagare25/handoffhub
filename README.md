@@ -27,7 +27,7 @@ cp .env.example .env      # add GEMINI_API_KEY (optional – app works without i
 npm start                 # http://localhost:3000
 npm test                  # end-to-end smoke test (no API key needed)
 ```
-Node 20+ required.
+Node 22.13+ required (uses the built-in SQLite module, so `npm install` needs no C++ build tools).
 
 ## AI configuration
 
@@ -45,7 +45,7 @@ Node 20+ required.
 
 ## Data source
 
-SQLite (`better-sqlite3`, WAL mode) with tables `meetings`, `action_items`, `item_history`, `kb_docs`. On first start, `src/seed.js` loads realistic sample data (a two-week release-sync chain with an overdue item, an unowned item, a carried-forward item, and 4 KB docs). Set `SEED=false` to start empty. Carried items keep a `carried_from_id` link, so one item's full history across meetings can be reconstructed.
+SQLite (Node built-in `node:sqlite`, WAL mode, no native build step) with tables `meetings`, `action_items`, `item_history`, `kb_docs`. On first start, `src/seed.js` loads realistic sample data (a two-week release-sync chain with an overdue item, an unowned item, a carried-forward item, and 4 KB docs). Set `SEED=false` to start empty. Carried items keep a `carried_from_id` link, so one item's full history across meetings can be reconstructed.
 
 ## Logging
 

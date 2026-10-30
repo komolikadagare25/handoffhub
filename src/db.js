@@ -1,15 +1,15 @@
-const Database = require('better-sqlite3');
+// Uses Node's built-in SQLite (node:sqlite, Node >= 22.13): no native compile step, works on Windows/Render/Docker.
+const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'handoffhub.db');
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const raw = new DatabaseSync(dbPath);
+raw.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
-db.exec(`
+raw.exec(`
 CREATE TABLE IF NOT EXISTS meetings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
@@ -61,5 +61,22 @@ CREATE INDEX IF NOT EXISTS idx_items_meeting ON action_items(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_items_owner ON action_items(owner);
 CREATE INDEX IF NOT EXISTS idx_history_item ON item_history(item_id);
 `);
+
+// Thin wrapper keeping the small API the rest of the app uses: prepare() and transaction().
+const db = {
+  prepare: (sql) => raw.prepare(sql),
+  exec: (sql) => raw.exec(sql),
+  transaction: (fn) => (...args) => {
+    raw.exec('BEGIN');
+    try {
+      const result = fn(...args);
+      raw.exec('COMMIT');
+      return result;
+    } catch (e) {
+      raw.exec('ROLLBACK');
+      throw e;
+    }
+  },
+};
 
 module.exports = db;

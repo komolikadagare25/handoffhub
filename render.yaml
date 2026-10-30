@@ -3,14 +3,17 @@ services:
     name: handoffhub
     runtime: node
     plan: free
+    # Node 22+ is required (built-in node:sqlite)
     buildCommand: npm ci
-    startCommand: node src/server.js
+    startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: GEMINI_API_KEY
         sync: false          # set this in the Render dashboard
       - key: GEMINI_MODEL
         value: gemini-2.0-flash
+      - key: NODE_VERSION
+        value: "22"
       - key: SEED
         value: "true"
 # Note: the free plan has an ephemeral disk, so data resets on redeploy/restart.
