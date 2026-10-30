@@ -1,0 +1,239 @@
+const $ = (s, el = document) => el.querySelector(s);
+const app = $('#app');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch('/api' + path, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'content-type': 'application/json' } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+function toast(msg, ms = 3200) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), ms);
+}
+// wrap a click handler: disables button, shows errors as toasts
+function guarded(btn, fn) {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { toast('⚠ ' + e.message); } finally { btn.disabled = false; }
+  });
+}
+const modal = (html) => { $('#modal-body').innerHTML = html; $('#modal').showModal(); };
+const aiTag = (r) => (r.fallback ? '<span class="chip warn">fallback (AI unavailable)</span>' : r.ai_used ? '<span class="chip">✨ AI</span>' : '');
+const statusChip = (s) => `<span class="chip ${s === 'done' ? 'ok' : s === 'cancelled' ? 'bad' : s === 'carried' ? '' : 'warn'}">${esc(s.replace('_', ' '))}</span>`;
+const dueCell = (i) => (i.due_date ? `<span class="${i.overdue ? 'overdue' : ''}">${esc(i.due_date)}${i.overdue ? ' ⚠' : ''}</span>` : '<span class="muted">—</span>');
+
+// ---------- navigation ----------
+const views = { meetings: viewMeetings, items: viewItems, radar: viewRadar, kb: viewKb };
+document.querySelectorAll('#tabs button').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
+function go(view, arg) {
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === (view === 'meeting' ? 'meetings' : view)));
+  (view === 'meeting' ? viewMeeting : views[view])(arg).catch((e) => { app.innerHTML = `<div class="card">⚠ ${esc(e.message)}</div>`; });
+}
+
+// ---------- meetings list ----------
+async function viewMeetings() {
+  const list = await api('/meetings');
+  app.innerHTML = `
+  <h2>Meetings & work transfers</h2>
+  <div class="card"><h3 style="margin-top:0">New</h3>
+    <div class="grid2">
+      <div><label>Title *</label><input id="m-title" maxlength="200" placeholder="e.g. Sprint planning"></div>
+      <div><label>Type</label><select id="m-type"><option value="meeting">Meeting</option><option value="handoff">Work transfer (handoff)</option></select></div>
+      <div><label>Participants (comma separated)</label><input id="m-people" placeholder="Aarav, Meera"></div>
+      <div><label>Date</label><input id="m-date" type="date"></div>
+    </div>
+    <label>Agenda</label><textarea id="m-agenda" style="min-height:60px"></textarea>
+    <div style="margin-top:10px"><button id="m-create">Create</button></div>
+  </div>
+  <div class="card">${list.length ? list.map((m) => `
+    <div class="list-item" data-id="${m.id}">
+      <div><strong>${esc(m.title)}</strong> <span class="chip">${esc(m.type)}</span><span class="chip">${esc(m.status)}</span><br>
+      <span class="muted">${esc(m.participants.join(', ') || 'no participants')} · ${m.scheduled_at ? esc(m.scheduled_at) : 'no date'}</span></div>
+      <div class="muted">${m.open_items} open / ${m.total_items} items</div>
+    </div>`).join('') : '<p class="muted">No meetings yet.</p>'}</div>`;
+  app.querySelectorAll('.list-item').forEach((el) => el.addEventListener('click', () => go('meeting', el.dataset.id)));
+  guarded($('#m-create'), async () => {
+    const m = await api('/meetings', { method: 'POST', body: {
+      title: $('#m-title').value, type: $('#m-type').value, agenda: $('#m-agenda').value,
+      participants: $('#m-people').value.split(',').map((s) => s.trim()).filter(Boolean), scheduled_at: $('#m-date').value || null } });
+    toast('Created'); go('meeting', m.id);
+  });
+}
+
+// ---------- meeting detail ----------
+async function viewMeeting(id) {
+  const m = await api('/meetings/' + id);
+  const people = m.participants;
+  app.innerHTML = `
+  <p><a href="#" id="back">← All meetings</a></p>
+  <div class="card">
+    <div class="row"><h2 class="grow" style="margin:0">${esc(m.title)}</h2>
+      <span class="chip">${esc(m.type)}</span>
+      <select id="m-status" style="width:auto">${['draft', 'scheduled', 'completed', 'archived'].map((s) => `<option ${s === m.status ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+    <p class="muted">${esc(people.join(', ') || 'No participants')} · ${m.scheduled_at || 'no date'}${m.prev_meeting_id ? ` · follows <a href="#" id="prev">meeting #${m.prev_meeting_id}</a>` : ''}</p>
+    ${m.agenda ? `<p><strong>Agenda:</strong> ${esc(m.agenda)}</p>` : ''}
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Raw notes → AI recap</h3>
+    <p class="muted">Paste notes, chat excerpts, an email thread or a transcript.</p>
+    <textarea id="notes" placeholder="Paste anything unstructured here...">${esc(m.notes)}</textarea>
+    <div class="row" style="margin-top:10px"><button id="recap">✨ Generate recap & action items</button><button class="ghost" id="save-notes">Save notes only</button></div>
+    ${m.summary ? `<div class="brief"><strong>Summary</strong><p>${esc(m.summary)}</p>
+      ${m.decisions.length ? `<strong>Decisions</strong><ul>${m.decisions.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}</div>` : ''}
+  </div>
+
+  <div class="card">
+    <div class="row"><h3 class="grow" style="margin:0">Action items</h3>
+      <button class="ghost small" id="carry">Carry open items to next meeting →</button></div>
+    <table><thead><tr><th>Item</th><th>Owner</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>
+    ${m.items.map((i) => `<tr data-id="${i.id}">
+      <td>${esc(i.title)} ${i.source === 'ai' ? '<span class="chip">✨</span>' : ''}${i.carried_from_id ? '<span class="chip">carried</span>' : ''}${i.outcome ? `<br><span class="muted">Outcome: ${esc(i.outcome)}</span>` : ''}</td>
+      <td>${esc(i.owner) || '<span class="muted">unassigned</span>'}</td><td>${dueCell(i)}</td><td>${statusChip(i.status)}</td>
+      <td style="white-space:nowrap">
+        ${['open', 'in_progress'].includes(i.status) ? `<button class="small ghost act-edit">Edit</button> <button class="small act-close">Close</button> <button class="small ghost act-nudge">Nudge</button>` : ''}
+        <button class="small ghost act-history">History</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No items yet.</td></tr>'}
+    </tbody></table>
+    <h3>Add item</h3>
+    <div class="row"><input class="grow" id="i-title" placeholder="What needs to be done?"><input id="i-owner" list="people" placeholder="Owner" style="width:150px"><input id="i-due" type="date" style="width:160px"><button id="i-add">Add</button></div>
+    <datalist id="people">${people.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
+  </div>
+
+  <div class="grid2">
+    <div class="card"><h3 style="margin-top:0">Catch-up brief</h3>
+      <p class="muted">For someone who missed it or is taking over.</p>
+      <div class="row"><input id="who" list="people" placeholder="Person (optional)" class="grow"><button id="catchup">✨ Generate</button></div><div id="brief"></div></div>
+    <div class="card"><h3 style="margin-top:0">Linked knowledge</h3>
+      <button class="ghost" id="link">✨ Link to knowledge base</button>
+      <div id="links">${m.kb_links.map((l) => `<p><strong>${esc(l.title)}</strong><br><span class="muted">${esc(l.reason)} (${Math.round(l.score * 100)}%)</span></p>`).join('')}</div></div>
+  </div>`;
+
+  $('#back').onclick = (e) => { e.preventDefault(); go('meetings'); };
+  if ($('#prev')) $('#prev').onclick = (e) => { e.preventDefault(); go('meeting', m.prev_meeting_id); };
+  $('#m-status').onchange = async (e) => { try { await api('/meetings/' + id, { method: 'PUT', body: { status: e.target.value } }); toast('Status updated'); } catch (er) { toast('⚠ ' + er.message); } };
+  guarded($('#save-notes'), async () => { await api('/meetings/' + id, { method: 'PUT', body: { notes: $('#notes').value } }); toast('Notes saved'); });
+  guarded($('#recap'), async () => {
+    toast('Generating recap…', 15000);
+    const r = await api(`/meetings/${id}/recap`, { method: 'POST', body: { notes: $('#notes').value } });
+    toast(r.fallback ? 'AI unavailable — used rule-based fallback' : `Recap ready · ${r.created_item_ids.length} items added`);
+    go('meeting', id);
+  });
+  guarded($('#i-add'), async () => {
+    await api(`/meetings/${id}/items`, { method: 'POST', body: { title: $('#i-title').value, owner: $('#i-owner').value, due_date: $('#i-due').value || null } });
+    go('meeting', id);
+  });
+  guarded($('#carry'), async () => {
+    if (!confirm('Create a follow-up and carry all open items into it?')) return;
+    const r = await api(`/meetings/${id}/carry-forward`, { method: 'POST', body: {} });
+    toast(`${r.carried} item(s) carried forward`); go('meeting', r.meeting.id);
+  });
+  guarded($('#catchup'), async () => {
+    $('#brief').innerHTML = '<p class="muted">Thinking…</p>';
+    const b = await api(`/meetings/${id}/catchup?person=${encodeURIComponent($('#who').value)}`);
+    const ul = (a) => (a.length ? `<ul>${a.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="muted">None</p>');
+    $('#brief').innerHTML = `<div class="brief">${aiTag(b)}<p>${esc(b.brief)}</p><strong>Key decisions</strong>${ul(b.key_decisions)}<strong>Your actions</strong>${ul(b.your_actions)}<strong>Risks</strong>${ul(b.risks)}</div>`;
+  });
+  guarded($('#link'), async () => {
+    const r = await api(`/meetings/${id}/link-kb`, { method: 'POST' });
+    $('#links').innerHTML = (r.links.map((l) => `<p><strong>${esc(l.title)}</strong><br><span class="muted">${esc(l.reason)} (${Math.round(l.score * 100)}%)</span></p>`).join('') || '<p class="muted">Nothing relevant found.</p>') + aiTag(r);
+  });
+  wireItemActions(m.items, () => go('meeting', id));
+}
+
+function wireItemActions(items, refresh) {
+  const find = (el) => items.find((i) => i.id === Number(el.closest('tr').dataset.id));
+  app.querySelectorAll('.act-close').forEach((b) => b.addEventListener('click', () => {
+    const it = find(b);
+    modal(`<h3>Close: ${esc(it.title)}</h3><label>Outcome *</label><textarea id="outcome" placeholder="What was the result?"></textarea>
+      <label>Result</label><select id="res"><option value="done">Done</option><option value="cancelled">Cancelled / not needed</option></select>
+      <p><button id="do-close">Close item</button></p>`);
+    guarded($('#do-close'), async () => { await api(`/items/${it.id}/close`, { method: 'POST', body: { outcome: $('#outcome').value, status: $('#res').value } }); $('#modal').close(); toast('Item closed'); refresh(); });
+  }));
+  app.querySelectorAll('.act-edit').forEach((b) => b.addEventListener('click', () => {
+    const it = find(b);
+    modal(`<h3>Edit item</h3><label>Title</label><input id="e-title" value="${esc(it.title)}"><label>Owner</label><input id="e-owner" value="${esc(it.owner)}">
+      <label>Due</label><input id="e-due" type="date" value="${esc(it.due_date || '')}"><label>Status</label>
+      <select id="e-status"><option ${it.status === 'open' ? 'selected' : ''} value="open">open</option><option ${it.status === 'in_progress' ? 'selected' : ''} value="in_progress">in progress</option></select>
+      <p><button id="e-save">Save</button></p>`);
+    guarded($('#e-save'), async () => { await api('/items/' + it.id, { method: 'PATCH', body: { title: $('#e-title').value, owner: $('#e-owner').value, due_date: $('#e-due').value || null, status: $('#e-status').value } }); $('#modal').close(); toast('Saved'); refresh(); });
+  }));
+  app.querySelectorAll('.act-history').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      const h = await api(`/items/${find(b).id}/history`);
+      modal(`<h3>History</h3>${h.chain.length > 1 ? `<p class="muted">Carried through ${h.chain.length} meetings</p>` : ''}<ul class="timeline">${h.events.map((e) => `<li><strong>${esc(e.event.replace(/_/g, ' '))}</strong> <span class="muted">${esc(e.at)} · meeting #${e.meeting_id}</span><br>${esc(e.detail)}</li>`).join('')}</ul>`);
+    } catch (e) { toast('⚠ ' + e.message); }
+  }));
+  app.querySelectorAll('.act-nudge').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const it = find(b); const n = await api(`/items/${it.id}/nudge`, { method: 'POST' });
+      modal(`<h3>Draft nudge for ${esc(it.owner || 'owner')}</h3>${aiTag(n)}<textarea id="nudge">${esc(n.message)}</textarea><p><button id="copy">Copy</button></p>`);
+      $('#copy').onclick = () => { navigator.clipboard?.writeText($('#nudge').value); toast('Copied'); };
+    } catch (e) { toast('⚠ ' + e.message); } finally { b.disabled = false; }
+  }));
+}
+
+// ---------- all items ----------
+async function viewItems() {
+  const status = viewItems.status || '';
+  const items = await api('/items' + (status ? `?status=${status}` : ''));
+  app.innerHTML = `<h2>All action items</h2>
+  <div class="card"><div class="row"><label style="margin:0">Filter</label>
+    <select id="f-status" style="width:auto"><option value="">All</option>${['open', 'in_progress', 'done', 'cancelled', 'carried'].map((s) => `<option ${s === status ? 'selected' : ''} value="${s}">${s.replace('_', ' ')}</option>`).join('')}</select></div>
+  <table><thead><tr><th>Item</th><th>Owner</th><th>Due</th><th>Status</th><th>Meeting</th><th></th></tr></thead><tbody>
+  ${items.map((i) => `<tr data-id="${i.id}"><td>${esc(i.title)}${i.outcome ? `<br><span class="muted">Outcome: ${esc(i.outcome)}</span>` : ''}</td><td>${esc(i.owner) || '<span class="muted">—</span>'}</td><td>${dueCell(i)}</td><td>${statusChip(i.status)}</td>
+    <td><a href="#" class="mt" data-m="${i.meeting_id}">${esc(i.meeting_title)}</a></td>
+    <td style="white-space:nowrap">${['open', 'in_progress'].includes(i.status) ? '<button class="small ghost act-edit">Edit</button> <button class="small act-close">Close</button> <button class="small ghost act-nudge">Nudge</button>' : ''} <button class="small ghost act-history">History</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing here.</td></tr>'}
+  </tbody></table></div>`;
+  $('#f-status').onchange = (e) => { viewItems.status = e.target.value; go('items'); };
+  app.querySelectorAll('.mt').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); go('meeting', a.dataset.m); }));
+  wireItemActions(items, () => go('items'));
+}
+
+// ---------- special feature: radar ----------
+async function viewRadar() {
+  const r = await api('/radar');
+  const max = Math.max(1, ...r.people.map((p) => p.risk));
+  app.innerHTML = `<h2>Handoff Radar</h2>
+  <p class="muted">Context-loss risk, scored from overdue days, times an item was carried forward, missing owners and imminent due dates. Use it to decide who needs a nudge or cover.</p>
+  <div class="grid2">
+    <div class="card"><h3 style="margin-top:0">Who is at risk</h3>
+      ${r.people.map((p) => `<div style="margin-bottom:12px"><div class="row"><strong class="grow">${esc(p.owner)}</strong><span class="chip ${p.level === 'high' ? 'bad' : p.level === 'medium' ? 'warn' : 'ok'}">${p.level}</span></div>
+      <span class="muted">${p.open} open · ${p.overdue} overdue · score ${p.risk}</span><div class="bar ${p.level}"><i style="width:${(p.risk / max) * 100}%"></i></div></div>`).join('') || '<p class="muted">All clear 🎉</p>'}
+    </div>
+    <div class="card"><h3 style="margin-top:0">Cover for someone on leave</h3>
+      <label>From</label><input id="r-from" placeholder="Person going on leave">
+      <label>To</label><input id="r-to" placeholder="Person taking over">
+      <p><button id="r-go">Reassign all their open items</button></p>
+      <p class="muted">Every move is recorded in each item's history.</p></div>
+  </div>
+  <div class="card"><h3 style="margin-top:0">Items most likely to fall through</h3>
+    <table><thead><tr><th>Item</th><th>Owner</th><th>Overdue</th><th>Carried</th><th>Score</th><th></th></tr></thead><tbody>
+    ${r.at_risk_items.map((i) => `<tr data-id="${i.id}"><td>${esc(i.title)}<br><span class="muted">${esc(i.meeting_title)}</span></td><td>${esc(i.owner) || '<span class="overdue">unassigned</span>'}</td>
+      <td>${i.overdueDays ? `<span class="overdue">${i.overdueDays}d</span>` : '—'}</td><td>${i.carries}×</td><td><strong>${i.risk}</strong></td><td><button class="small act-nudge">Nudge</button></td></tr>`).join('')}
+    </tbody></table></div>`;
+  guarded($('#r-go'), async () => { const x = await api('/items/reassign', { method: 'POST', body: { from: $('#r-from').value, to: $('#r-to').value } }); toast(`${x.reassigned} item(s) reassigned`); go('radar'); });
+  wireItemActions(r.at_risk_items.map((i) => ({ ...i })), () => go('radar'));
+}
+
+// ---------- knowledge base ----------
+async function viewKb() {
+  const docs = await api('/kb');
+  app.innerHTML = `<h2>Knowledge base</h2>
+  <div class="card"><h3 style="margin-top:0">Add document</h3>
+    <label>Title *</label><input id="k-title" maxlength="200"><label>Tags</label><input id="k-tags" placeholder="comma,separated">
+    <label>Content *</label><textarea id="k-content"></textarea><p><button id="k-add">Add</button></p></div>
+  <div class="card">${docs.map((d) => `<div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="row"><strong class="grow">${esc(d.title)}</strong><button class="small ghost k-del" data-id="${d.id}">Delete</button></div>
+    <span class="muted">${esc(d.tags)}</span><p>${esc(d.content.slice(0, 260))}${d.content.length > 260 ? '…' : ''}</p></div>`).join('') || '<p class="muted">Empty.</p>'}</div>`;
+  guarded($('#k-add'), async () => { await api('/kb', { method: 'POST', body: { title: $('#k-title').value, tags: $('#k-tags').value, content: $('#k-content').value } }); toast('Added'); go('kb'); });
+  app.querySelectorAll('.k-del').forEach((b) => guarded(b, async () => { if (confirm('Delete this document?')) { await api('/kb/' + b.dataset.id, { method: 'DELETE' }); go('kb'); } }));
+}
+
+go('meetings');

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HandoffHub</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">⇄ HandoffHub <span>never lose context again</span></div>
+  <nav id="tabs">
+    <button data-view="meetings" class="active">Meetings</button>
+    <button data-view="items">Action Items</button>
+    <button data-view="radar">Radar ✦</button>
+    <button data-view="kb">Knowledge Base</button>
+  </nav>
+</header>
+<main id="app"></main>
+<div id="toast" role="status" aria-live="polite"></div>
+<dialog id="modal"><div id="modal-body"></div><form method="dialog"><button class="ghost">Close</button></form></dialog>
+<script src="app.js"></script>
+</body>
+</html>
