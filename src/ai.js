@@ -3,7 +3,9 @@ const { logger } = require('./logger');
 class AIError extends Error {}
 
 const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 20000);
-const MAX_ATTEMPTS = 2;
+// gemini-2.0-flash was shut down by Google in June 2026; keep these configurable via env.
+const DEFAULT_MODEL = 'gemini-3.8-flash';
+const DEFAULT_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 /**
  * Single choke point for every LLM call.
@@ -17,11 +19,13 @@ async function callModel(task, prompt, { json = true } = {}) {
     logger.warn({ event: 'ai_call', task, outcome: 'skipped', reason: 'GEMINI_API_KEY not set' });
     throw new AIError('AI not configured');
   }
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  // Primary model first, then a backup model, so one retired/overloaded model does not break the app.
+  const models = [...new Set([process.env.GEMINI_MODEL || DEFAULT_MODEL, process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL])];
   let lastErr;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= models.length; attempt++) {
+    const model = models[attempt - 1];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const started = Date.now();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
@@ -35,7 +39,11 @@ async function callModel(task, prompt, { json = true } = {}) {
         }),
         signal: ctrl.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // Google's error body explains the cause (bad key, retired model, quota). It never contains our key.
+        const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+        throw new Error(`HTTP ${res.status}: ${body}`);
+      }
       const data = await res.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) throw new Error('empty model response');
@@ -44,7 +52,7 @@ async function callModel(task, prompt, { json = true } = {}) {
       return out;
     } catch (e) {
       lastErr = e;
-      const level = attempt === MAX_ATTEMPTS ? 'error' : 'warn';
+      const level = attempt === models.length ? 'error' : 'warn';
       logger[level]({
         event: 'ai_call', task, model, attempt, latencyMs: Date.now() - started, outcome: 'failure',
         error: e.name === 'AbortError' ? 'timeout' : e.message,
