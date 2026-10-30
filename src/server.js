@@ -6,6 +6,8 @@ const db = require('./db');
 const { logger, als } = require('./logger');
 const ai = require('./ai');
 const { seedIfEmpty } = require('./seed');
+const { scoreItem, plusDays } = require('./risk');
+const { buildHandoverData, aiContext, fallbackNarrative, renderMarkdown } = require('./handover');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -165,6 +167,39 @@ app.post('/api/meetings/:id/recap', async (req, res) => {
   res.json({ ...recap, created_item_ids: created, meeting: getMeeting(id) });
 });
 
+// Human-in-the-loop recap, step 1: generate a PREVIEW. Nothing is written to the database.
+app.post('/api/meetings/:id/recap/preview', async (req, res) => {
+  const id = parseId(req.params.id);
+  const m = getMeeting(id);
+  const raw = cleanStr(req.body?.notes ?? m.notes, 'notes', { required: true, max: 50000 });
+  const recap = await ai.generateRecap(raw, { title: m.title, participants: m.participants });
+  logger.info({ event: 'recap_previewed', meetingId: id, items: recap.action_items.length, ai_used: recap.ai_used });
+  res.json(recap);
+});
+
+// Step 2: the person reviews/edits the preview, then approves. Only now is anything saved (validated like any other input).
+app.post('/api/meetings/:id/recap/apply', (req, res) => {
+  const id = parseId(req.params.id);
+  getMeeting(id);
+  const b = req.body || {};
+  const notes = cleanStr(b.notes, 'notes', { max: 50000 });
+  const summary = cleanStr(b.summary, 'summary', { required: true, max: 5000 });
+  const decisions = cleanList(b.decisions, 'decisions');
+  if (b.action_items !== undefined && !Array.isArray(b.action_items)) throw new ApiError(400, 'action_items must be an array');
+  const items = (b.action_items || []).slice(0, 50).map((a, k) => ({
+    title: cleanStr(a?.title, `action_items[${k}].title`, { max: 300 }),
+    owner: cleanStr(a?.owner, `action_items[${k}].owner`, { max: 100 }),
+    due_date: cleanDate(a?.due_date, `action_items[${k}].due_date`),
+  })).filter((a) => a.title);
+  const source = b.ai_used ? 'ai' : 'manual';
+  const created = db.transaction(() => {
+    db.prepare("UPDATE meetings SET notes=?, summary=?, decisions=?, updated_at=datetime('now') WHERE id=?").run(notes, summary, JSON.stringify(decisions), id);
+    return items.map((a) => insertItem(id, { ...a, source }));
+  })();
+  logger.info({ event: 'recap_approved', meetingId: id, items: created.length, decisions: decisions.length, ai_used: !!b.ai_used });
+  res.status(201).json({ meeting: getMeeting(id), created_item_ids: created });
+});
+
 // AI: catch-up brief for someone who missed it / is taking over
 app.get('/api/meetings/:id/catchup', async (req, res) => {
   const id = parseId(req.params.id);
@@ -296,19 +331,12 @@ app.post('/api/items/reassign', (req, res) => {
 });
 
 // ---------- SPECIAL FEATURE: Handoff Radar + AI nudges ----------
-app.get('/api/radar', (req, res) => {
-  const t = todayStr();
-  const soon = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
-  const open = db.prepare(`SELECT a.*, m.title AS meeting_title,
-      (SELECT COUNT(*) FROM action_items p WHERE p.id = a.carried_from_id) AS has_parent
+function computeRadar() {
+  const open = db.prepare(`SELECT a.*, m.title AS meeting_title
     FROM action_items a JOIN meetings m ON m.id = a.meeting_id WHERE a.status IN ('open','in_progress')`).all();
-  const carries = (id) => { let n = 0; let cur = db.prepare('SELECT carried_from_id FROM action_items WHERE id=?').get(id); while (cur && cur.carried_from_id && n < 50) { n++; cur = db.prepare('SELECT carried_from_id FROM action_items WHERE id=?').get(cur.carried_from_id); } return n; };
   const scored = open.map((i) => {
-    const overdueDays = i.due_date && i.due_date < t ? daysBetween(i.due_date, t) : 0;
-    const dueSoon = i.due_date && i.due_date >= t && i.due_date <= soon;
-    const c = carries(i.id);
-    const risk = (overdueDays ? 3 + Math.min(overdueDays, 10) * 0.3 : 0) + (dueSoon ? 1 : 0) + c * 1.5 + (i.owner ? 0 : 2) + (i.due_date ? 0 : 0.5);
-    return { id: i.id, title: i.title, owner: i.owner, due_date: i.due_date, meeting_id: i.meeting_id, meeting_title: i.meeting_title, overdueDays, carries: c, risk: +risk.toFixed(1) };
+    const sc = scoreItem(i);
+    return { id: i.id, title: i.title, owner: i.owner, due_date: i.due_date, status: i.status, meeting_id: i.meeting_id, meeting_title: i.meeting_title, overdueDays: sc.overdueDays, carries: sc.carries, risk: sc.risk };
   }).sort((a, b) => b.risk - a.risk);
   const byOwner = {};
   for (const s of scored) {
@@ -317,6 +345,10 @@ app.get('/api/radar', (req, res) => {
     byOwner[k].open++; byOwner[k].risk += s.risk; if (s.overdueDays) byOwner[k].overdue++;
   }
   const people = Object.values(byOwner).map((p) => ({ ...p, risk: +p.risk.toFixed(1), level: p.risk >= 8 ? 'high' : p.risk >= 4 ? 'medium' : 'low' })).sort((a, b) => b.risk - a.risk);
+  return { people, scored };
+}
+app.get('/api/radar', (req, res) => {
+  const { people, scored } = computeRadar();
   res.json({ people, at_risk_items: scored.slice(0, 10) });
 });
 
@@ -330,6 +362,69 @@ app.post('/api/items/:id/nudge', async (req, res) => {
   const out = await ai.draftNudge(item, { meetingTitle: m.title, daysOverdue, carries });
   logHistory(id, 'nudge_drafted', `ai_used=${out.ai_used}`);
   res.json(out);
+});
+
+// ---------- dashboard ----------
+app.get('/api/stats', (req, res) => {
+  const t = todayStr();
+  const count = (sql, ...a) => db.prepare(sql).get(...a).c;
+  const open = count("SELECT COUNT(*) c FROM action_items WHERE status = 'open'");
+  const in_progress = count("SELECT COUNT(*) c FROM action_items WHERE status = 'in_progress'");
+  const { people, scored } = computeRadar();
+  const upcoming = db.prepare(`SELECT m.id, m.title, m.type, m.status, m.scheduled_at,
+      (SELECT COUNT(*) FROM action_items a WHERE a.meeting_id = m.id AND a.status IN ('open','in_progress')) AS open_items
+    FROM meetings m WHERE m.status IN ('scheduled','draft')
+    ORDER BY (m.scheduled_at IS NULL), m.scheduled_at LIMIT 5`).all();
+  const activity = db.prepare(`SELECT h.event, h.detail, h.at, a.title, a.id AS item_id, a.meeting_id
+    FROM item_history h JOIN action_items a ON a.id = h.item_id
+    WHERE h.event != 'created' OR h.id IN (SELECT MAX(id) FROM item_history GROUP BY item_id)
+    ORDER BY h.at DESC, h.id DESC LIMIT 8`).all();
+  res.json({
+    items: {
+      open, in_progress, active: open + in_progress,
+      overdue: scored.filter((i) => i.overdueDays > 0).length,
+      due_soon: count("SELECT COUNT(*) c FROM action_items WHERE status IN ('open','in_progress') AND due_date >= ? AND due_date <= ?", t, plusDays(3)),
+      unassigned: count("SELECT COUNT(*) c FROM action_items WHERE status IN ('open','in_progress') AND owner = ''"),
+      done_this_week: count("SELECT COUNT(DISTINCT h.item_id) c FROM item_history h JOIN action_items a ON a.id = h.item_id WHERE h.event = 'closed' AND a.status = 'done' AND h.at >= datetime('now','-7 days')"),
+    },
+    meetings: { total: count('SELECT COUNT(*) c FROM meetings'), upcoming },
+    workload: people.map((p) => ({ owner: p.owner, open: p.open, overdue: p.overdue, level: p.level })),
+    top_risks: scored.slice(0, 5),
+    activity,
+  });
+});
+
+app.get('/api/people', (req, res) => {
+  const names = new Map();
+  const add = (n) => { const v = String(n || '').trim(); if (v && !names.has(v.toLowerCase())) names.set(v.toLowerCase(), v); };
+  db.prepare("SELECT DISTINCT owner FROM action_items WHERE owner != ''").all().forEach((r) => add(r.owner));
+  db.prepare('SELECT participants FROM meetings').all().forEach((r) => JSON.parse(r.participants).forEach(add));
+  res.json([...names.values()].sort((a, b) => a.localeCompare(b)));
+});
+
+// ---------- HANDOVER PACK: one click when someone goes on leave ----------
+app.get('/api/handover', async (req, res) => {
+  const from = cleanStr(req.query.from, 'from', { required: true, max: 100 });
+  const to = cleanStr(req.query.to, 'to', { max: 100 });
+  const until = cleanDate(req.query.until || null, 'until');
+  if (to && to.toLowerCase() === from.toLowerCase()) throw new ApiError(400, 'from and to must differ');
+  const data = buildHandoverData(from, { to, until });
+  if (!data.meetings.length) {
+    logger.info({ event: 'handover_empty', person: from });
+    return res.json({ empty: true, person: from, message: `${from} has no open or in-progress items, so there is nothing to hand over.`, markdown: '', data });
+  }
+  const fallback = fallbackNarrative(data);
+  const out = await ai.generateHandover(aiContext(data), fallback, {
+    meetingIds: data.meetings.map((m) => m.id), candidateNames: data.candidates.map((c) => c.name),
+  });
+  const markdown = renderMarkdown(data, out.narrative, { ai_used: out.ai_used });
+  logger.info({ event: 'handover_generated', person: from, to, meetings: data.totals.meetings, items: data.totals.open, ai_used: out.ai_used });
+  if (req.query.format === 'md') {
+    const slug = from.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'person';
+    res.set({ 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="handover-${slug}-${todayStr()}.md"` });
+    return res.send(markdown);
+  }
+  res.json({ empty: false, person: from, to, ai_used: out.ai_used, fallback: out.fallback, ai_error: out.ai_error, totals: data.totals, markdown, data });
 });
 
 // ---------- knowledge base ----------

@@ -277,4 +277,44 @@ Context: from meeting "${ctx.meetingTitle}"; days overdue: ${ctx.daysOverdue}; t
   }
 }
 
-module.exports = { generateRecap, generateCatchup, linkKnowledge, draftNudge, AIError };
+// ---------- 5. Handover pack narrative ----------
+// The model only writes prose. Facts (items, dates, links) are assembled in handover.js; whatever the model returns is
+// validated against that data (unknown meeting ids / people are dropped) and merged over the deterministic fallback.
+async function generateHandover(ctx, fallback, { meetingIds, candidateNames }) {
+  const prompt = `You are writing a HANDOVER DOCUMENT so that a colleague can cover for ${ctx.person}${ctx.back_on ? ` until ${ctx.back_on}` : ''}${ctx.covering ? ` (covering: ${ctx.covering})` : ''}.
+Today is ${ctx.today}. Use ONLY the facts in CONTEXT. Never invent names, dates, decisions or meetings.
+Return ONLY JSON in this exact shape:
+{"overview": string (3-5 sentences: what ${ctx.person} is responsible for, what is most urgent, what the cover should do first),
+ "meetings": [{"meeting_id": number (from CONTEXT), "context": string (2-3 sentences: why this work exists, what was decided, where it stands now), "first_steps": string[] (1-3 concrete actions for the cover, most urgent first)}],
+ "risks": string[] (max 5; specific, naming the item and why it is risky; base them on known_risks and the items),
+ "who_to_ask": [{"name": string (MUST be one of people_who_know_this), "ask_about": string (what that person can help with)}]}
+Write plainly for someone who was NOT in the meetings. Mention overdue or repeatedly-carried items explicitly.
+
+CONTEXT (JSON):
+${JSON.stringify(ctx).slice(0, 14000)}`;
+  try {
+    const raw = await callModel('handover', prompt);
+    const out = { ...fallback, meetings: { ...fallback.meetings } };
+    if (str(raw.overview)) out.overview = str(raw.overview);
+    for (const m of Array.isArray(raw.meetings) ? raw.meetings : []) {
+      const id = Number(m.meeting_id);
+      if (!meetingIds.includes(id)) continue; // hallucinated meeting
+      const steps = (Array.isArray(m.first_steps) ? m.first_steps : []).map(str).filter(Boolean).slice(0, 4);
+      out.meetings[id] = { context: str(m.context) || fallback.meetings[id].context, first_steps: steps.length ? steps : fallback.meetings[id].first_steps };
+    }
+    const risks = (Array.isArray(raw.risks) ? raw.risks : []).map(str).filter(Boolean).slice(0, 6);
+    if (risks.length) out.risks = risks;
+    const known = new Map(candidateNames.map((n) => [n.toLowerCase(), n]));
+    const who = (Array.isArray(raw.who_to_ask) ? raw.who_to_ask : [])
+      .filter((w) => known.has(str(w.name).toLowerCase())) // hallucinated person
+      .map((w) => ({ name: known.get(str(w.name).toLowerCase()), ask_about: str(w.ask_about) || 'context on this work' }));
+    if (who.length) out.who_to_ask = who.slice(0, 5);
+    if (!str(raw.overview)) throw new AIError('model returned no overview');
+    return { narrative: out, ai_used: true, fallback: false };
+  } catch (e) {
+    logger.warn({ event: 'handover_fallback', reason: e.message });
+    return { narrative: fallback, ai_used: false, fallback: true, ai_error: String(e.message).slice(0, 200) };
+  }
+}
+
+module.exports = { generateRecap, generateCatchup, linkKnowledge, draftNudge, generateHandover, AIError };

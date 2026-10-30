@@ -30,7 +30,7 @@ const statusChip = (s) => `<span class="chip ${s === 'done' ? 'ok' : s === 'canc
 const dueCell = (i) => (i.due_date ? `<span class="${i.overdue ? 'overdue' : ''}">${esc(i.due_date)}${i.overdue ? ' ⚠' : ''}</span>` : '<span class="muted">—</span>');
 
 // ---------- navigation ----------
-const views = { meetings: viewMeetings, items: viewItems, radar: viewRadar, kb: viewKb };
+const views = { dashboard: viewDashboard, meetings: viewMeetings, board: viewBoard, items: viewItems, radar: viewRadar, handover: viewHandover, kb: viewKb };
 document.querySelectorAll('#tabs button').forEach((b) => b.addEventListener('click', () => go(b.dataset.view)));
 function go(view, arg) {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === (view === 'meeting' ? 'meetings' : view)));
@@ -85,7 +85,7 @@ async function viewMeeting(id) {
     <h3 style="margin-top:0">Raw notes → AI recap</h3>
     <p class="muted">Paste notes, chat excerpts, an email thread or a transcript.</p>
     <textarea id="notes" placeholder="Paste anything unstructured here...">${esc(m.notes)}</textarea>
-    <div class="row" style="margin-top:10px"><button id="recap">✨ Generate recap & action items</button><button class="ghost" id="save-notes">Save notes only</button></div>
+    <div class="row" style="margin-top:10px"><button id="recap">✨ Generate recap for review</button><button class="ghost" id="save-notes">Save notes only</button><span class="muted">Nothing is saved until you approve it.</span></div>
     ${m.summary ? `<div class="brief"><strong>Summary</strong><p>${esc(m.summary)}</p>
       ${m.decisions.length ? `<strong>Decisions</strong><ul>${m.decisions.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}</div>` : ''}
   </div>
@@ -120,10 +120,11 @@ async function viewMeeting(id) {
   $('#m-status').onchange = async (e) => { try { await api('/meetings/' + id, { method: 'PUT', body: { status: e.target.value } }); toast('Status updated'); } catch (er) { toast('⚠ ' + er.message); } };
   guarded($('#save-notes'), async () => { await api('/meetings/' + id, { method: 'PUT', body: { notes: $('#notes').value } }); toast('Notes saved'); });
   guarded($('#recap'), async () => {
-    toast('Generating recap…', 15000);
-    const r = await api(`/meetings/${id}/recap`, { method: 'POST', body: { notes: $('#notes').value } });
-    toast(r.fallback ? `AI unavailable (${r.ai_error || 'unknown'}) — used rule-based fallback` : `Recap ready · ${r.created_item_ids.length} items added`, r.fallback ? 15000 : 3200);
-    go('meeting', id);
+    const notes = $('#notes').value;
+    toast('Generating preview…', 15000);
+    const r = await api(`/meetings/${id}/recap/preview`, { method: 'POST', body: { notes } });
+    $('#toast').classList.remove('show');
+    reviewRecap(id, notes, r, people, m.items.length, () => go('meeting', id));
   });
   guarded($('#i-add'), async () => {
     await api(`/meetings/${id}/items`, { method: 'POST', body: { title: $('#i-title').value, owner: $('#i-owner').value, due_date: $('#i-due').value || null } });
@@ -145,6 +146,34 @@ async function viewMeeting(id) {
     $('#links').innerHTML = (r.links.map((l) => `<p><strong>${esc(l.title)}</strong><br><span class="muted">${esc(l.reason)} (${Math.round(l.score * 100)}%)</span></p>`).join('') || '<p class="muted">Nothing relevant found.</p>') + aiTag(r);
   });
   wireItemActions(m.items, () => go('meeting', id));
+}
+
+
+// ---------- review before saving the AI recap ----------
+function reviewRecap(id, notes, r, people, existing, done) {
+  const row = (a = { title: '', owner: '', due_date: null }) => `<tr class="rr"><td><input type="checkbox" class="rr-on" checked aria-label="Include this item"></td>
+    <td><input class="rr-title" value="${esc(a.title)}" placeholder="Action item"></td><td><input class="rr-owner" list="rr-people" value="${esc(a.owner)}" placeholder="Owner" style="width:120px"></td>
+    <td><input class="rr-due" type="date" value="${esc(a.due_date || '')}" style="width:140px"></td></tr>`;
+  modal(`<h3 style="margin-top:0">Review before saving</h3>
+    <p class="muted">${aiTag(r)} Edit anything. Untick items that are wrong. <strong>Nothing is saved until you approve.</strong>
+    ${existing ? ` This meeting already has ${existing} item(s); approved items are added to them.` : ''}</p>
+    ${r.fallback ? `<p style="color:var(--warn)">AI unavailable (${esc(r.ai_error || 'unknown')}). This is a rule-based draft, so check it carefully.</p>` : ''}
+    <label>Summary</label><textarea id="rv-summary" style="min-height:90px">${esc(r.summary)}</textarea>
+    <label>Decisions (one per line)</label><textarea id="rv-decisions" style="min-height:70px">${esc(r.decisions.join('\n'))}</textarea>
+    <label>Action items</label>
+    <table class="rr"><thead><tr><th></th><th>Item</th><th>Owner</th><th>Due</th></tr></thead><tbody id="rv-rows">${r.action_items.map(row).join('')}</tbody></table>
+    <datalist id="rr-people">${people.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
+    <div class="row" style="margin-top:10px"><button class="ghost small" id="rv-add">+ Add row</button></div>
+    <div class="row" style="margin-top:14px"><button id="rv-ok">✓ Approve & save</button><button class="ghost" id="rv-discard">Discard</button></div>`);
+  $('#rv-add').onclick = () => $('#rv-rows').insertAdjacentHTML('beforeend', row());
+  $('#rv-discard').onclick = () => { $('#modal').close(); toast('Discarded. Nothing was saved.'); };
+  guarded($('#rv-ok'), async () => {
+    const action_items = [...document.querySelectorAll('#rv-rows .rr')].filter((tr) => $('.rr-on', tr).checked && $('.rr-title', tr).value.trim())
+      .map((tr) => ({ title: $('.rr-title', tr).value.trim(), owner: $('.rr-owner', tr).value.trim(), due_date: $('.rr-due', tr).value || null }));
+    const out = await api(`/meetings/${id}/recap/apply`, { method: 'POST', body: {
+      notes, summary: $('#rv-summary').value, decisions: $('#rv-decisions').value.split('\n').map((x) => x.trim()).filter(Boolean), action_items, ai_used: r.ai_used } });
+    $('#modal').close(); toast(`Saved · ${out.created_item_ids.length} item(s) added`); done();
+  });
 }
 
 function wireItemActions(items, refresh) {
@@ -180,6 +209,169 @@ function wireItemActions(items, refresh) {
   }));
 }
 
+
+// ---------- dashboard ----------
+async function viewDashboard() {
+  const s = await api('/stats');
+  const it = s.items;
+  const stat = (n, label, cls, target) => `<button class="stat ${cls}" data-go="${target}"><span class="n">${n}</span><span class="l">${label}</span></button>`;
+  const maxOpen = Math.max(1, ...s.workload.map((w) => w.open));
+  app.innerHTML = `<h2>Dashboard</h2>
+  <div class="cta"><div><strong>Someone going on leave?</strong><br><span class="muted">One click builds a handover document covering all their open items, risks, linked docs and who to ask.</span></div><button id="d-pack">📄 Create handover pack</button></div>
+  <div class="stats">
+    ${stat(it.active, `Open (${it.in_progress} in progress)`, '', 'board')}
+    ${stat(it.overdue, 'Overdue', it.overdue ? 'bad' : '', 'radar')}
+    ${stat(it.due_soon, 'Due in 3 days', it.due_soon ? 'warn' : '', 'items')}
+    ${stat(it.unassigned, 'Unassigned', it.unassigned ? 'warn' : '', 'items')}
+    ${stat(it.done_this_week, 'Closed this week', 'ok', 'board')}
+    ${stat(s.meetings.total, 'Meetings', '', 'meetings')}
+  </div>
+  <div class="grid2">
+    <div class="card"><h3 style="margin-top:0">Needs attention</h3>
+      ${s.top_risks.map((i) => `<div class="mini"><div><strong>${esc(i.title)}</strong><br><span class="muted">${esc(i.owner || 'unassigned')} · ${esc(i.meeting_title)}</span></div>
+        <div style="text-align:right">${i.overdueDays ? `<span class="overdue">${i.overdueDays}d late</span>` : i.due_date ? `<span class="muted">${esc(i.due_date)}</span>` : ''}<br><span class="muted">risk ${i.risk}</span></div></div>`).join('') || '<p class="muted">Nothing at risk 🎉</p>'}
+    </div>
+    <div class="card"><h3 style="margin-top:0">Upcoming meetings</h3>
+      ${s.meetings.upcoming.map((m) => `<div class="mini"><div><a href="#" class="mt" data-m="${m.id}"><strong>${esc(m.title)}</strong></a><br><span class="muted">${esc(m.type)} · ${esc(m.status)} · ${m.scheduled_at ? esc(m.scheduled_at) : 'no date'}</span></div><span class="muted">${m.open_items} open</span></div>`).join('') || '<p class="muted">No upcoming meetings.</p>'}
+    </div>
+    <div class="card"><h3 style="margin-top:0">Workload</h3>
+      ${s.workload.map((w) => `<div style="margin-bottom:10px"><div class="row"><strong class="grow">${esc(w.owner)}</strong><span class="muted">${w.open} open${w.overdue ? ` · <span class="overdue">${w.overdue} overdue</span>` : ''}</span></div><div class="bar ${w.level}"><i style="width:${(w.open / maxOpen) * 100}%"></i></div></div>`).join('') || '<p class="muted">No open work.</p>'}
+    </div>
+    <div class="card"><h3 style="margin-top:0">Recent activity</h3>
+      ${s.activity.map((a) => `<div class="mini"><div><strong>${esc(a.title)}</strong><br><span class="muted">${esc(a.event.replace(/_/g, ' '))}${a.detail ? ': ' + esc(a.detail.slice(0, 70)) : ''}</span></div><span class="muted">${esc(a.at.slice(0, 10))}</span></div>`).join('') || '<p class="muted">No activity yet.</p>'}
+    </div>
+  </div>`;
+  app.querySelectorAll('.stat').forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
+  app.querySelectorAll('.mt').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); go('meeting', a.dataset.m); }));
+  $('#d-pack').onclick = () => go('handover');
+}
+
+// ---------- kanban board ----------
+const BOARD_COLS = [['open', 'Open'], ['in_progress', 'In progress'], ['done', 'Done'], ['cancelled', 'Cancelled']];
+async function viewBoard() {
+  const owner = viewBoard.owner || '';
+  const [all, people] = await Promise.all([api('/items'), api('/people')]);
+  const items = all.filter((i) => i.status !== 'carried' && (!owner || (owner === '__none' ? !i.owner : i.owner === owner)));
+  const card = (i) => `<div class="kcard ${i.overdue ? 'late' : ''}" draggable="true" data-id="${i.id}">
+    <div class="kt">${esc(i.title)}</div>
+    <div>${i.owner ? `<span class="chip">${esc(i.owner)}</span>` : '<span class="chip warn">unassigned</span>'}${i.due_date ? `<span class="${i.overdue ? 'overdue' : 'muted'}">${esc(i.due_date)}${i.overdue ? ' ⚠' : ''}</span>` : ''}</div>
+    <div class="muted">${esc(i.meeting_title)}</div>${i.outcome ? `<div class="muted">Outcome: ${esc(i.outcome.slice(0, 90))}</div>` : ''}
+    <select class="kmove" aria-label="Move item to"><option value="">Move to…</option>${BOARD_COLS.filter(([k]) => k !== i.status).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>`;
+  app.innerHTML = `<h2>Board</h2>
+  <div class="row" style="margin-bottom:12px"><span class="muted grow">Drag cards between columns, or use the “Move to…” menu. Closing an item asks for its outcome.</span>
+    <label style="margin:0">Owner</label><select id="b-owner" style="width:auto"><option value="">Everyone</option><option value="__none" ${owner === '__none' ? 'selected' : ''}>Unassigned</option>${people.map((p) => `<option ${p === owner ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
+  <div class="board">${BOARD_COLS.map(([k, l]) => { const col = items.filter((i) => i.status === k); return `<div class="kcol" data-status="${k}"><h3>${l} <span>${col.length}</span></h3>${col.map(card).join('') || '<p class="muted">Drop here</p>'}</div>`; }).join('')}</div>`;
+
+  $('#b-owner').onchange = (e) => { viewBoard.owner = e.target.value; go('board'); };
+  const move = async (id, to) => {
+    const it = items.find((i) => i.id === id);
+    if (!it || it.status === to) return;
+    try {
+      if (to === 'done' || to === 'cancelled') {
+        modal(`<h3 style="margin-top:0">${to === 'done' ? 'Close' : 'Cancel'}: ${esc(it.title)}</h3><label>Outcome *</label><textarea id="outcome" placeholder="${to === 'done' ? 'What was the result?' : 'Why is this no longer needed?'}"></textarea><p><button id="do-move">${to === 'done' ? 'Mark done' : 'Mark cancelled'}</button></p>`);
+        guarded($('#do-move'), async () => {
+          const outcome = $('#outcome').value;
+          if (['done', 'cancelled'].includes(it.status)) await api('/items/' + id, { method: 'PATCH', body: { status: to, outcome } });
+          else await api(`/items/${id}/close`, { method: 'POST', body: { outcome, status: to } });
+          $('#modal').close(); toast('Item updated'); go('board');
+        });
+      } else {
+        await api('/items/' + id, { method: 'PATCH', body: { status: to } });
+        toast(`Moved to ${to.replace('_', ' ')}`); go('board');
+      }
+    } catch (e) { toast('⚠ ' + e.message); }
+  };
+  app.querySelectorAll('.kcard').forEach((c) => {
+    c.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', c.dataset.id); e.dataTransfer.effectAllowed = 'move'; c.classList.add('dragging'); });
+    c.addEventListener('dragend', () => c.classList.remove('dragging'));
+    $('.kmove', c).addEventListener('change', (e) => e.target.value && move(Number(c.dataset.id), e.target.value));
+  });
+  app.querySelectorAll('.kcol').forEach((col) => {
+    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('over'); });
+    col.addEventListener('dragleave', (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove('over'); });
+    col.addEventListener('drop', (e) => { e.preventDefault(); col.classList.remove('over'); move(Number(e.dataTransfer.getData('text/plain')), col.dataset.status); });
+  });
+}
+
+// ---------- handover pack ----------
+// Tiny renderer for the Markdown subset the server produces (headings, lists, tables, bold). Everything is escaped first.
+function mdToHtml(md) {
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  const out = []; const lines = md.split('\n'); let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    if (/^\|/.test(l)) {
+      const rows = []; while (i < lines.length && /^\|/.test(lines[i])) rows.push(lines[i++]);
+      const cells = (r) => r.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      const [head, , ...body] = rows;
+      out.push(`<table><thead><tr>${cells(head).map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${body.map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+      continue;
+    }
+    let m;
+    if ((m = l.match(/^(#{1,3}) (.*)/))) out.push(`<h${m[1].length + 1}>${inline(m[2])}</h${m[1].length + 1}>`);
+    else if (/^---+$/.test(l)) out.push('<hr>');
+    else if ((m = l.match(/^(\s*)- \[ \] (.*)/))) out.push(`<div class="li" style="margin-left:${m[1].length * 8}px">☐ ${inline(m[2])}</div>`);
+    else if ((m = l.match(/^(\s*)- (.*)/))) out.push(`<div class="li" style="margin-left:${m[1].length * 8 + 4}px">${m[1].length ? '◦' : '•'} ${inline(m[2])}</div>`);
+    else if ((m = l.match(/^(\d+)\. (.*)/))) out.push(`<div class="li" style="margin-left:4px">${m[1]}. ${inline(m[2])}</div>`);
+    else if ((m = l.match(/^_(.*)_$/))) out.push(`<p class="muted"><em>${esc(m[1])}</em></p>`);
+    else out.push(`<p>${inline(l)}</p>`);
+    i++;
+  }
+  return out.join('');
+}
+
+async function viewHandover() {
+  const people = await api('/people');
+  const pre = viewHandover.pre || {}; viewHandover.pre = null;
+  app.innerHTML = `<h2>Handover Pack</h2>
+  <p class="muted">Pick the person going on leave. HandoffHub gathers all their open items grouped by meeting, adds the background from earlier meetings, risks, linked knowledge-base docs and who to ask, and writes it up as a document you can edit and export.</p>
+  <div class="card"><div class="grid2">
+    <div><label>Going on leave *</label><input id="h-from" list="h-people" value="${esc(pre.from || '')}" placeholder="e.g. Meera"></div>
+    <div><label>Covering colleague (optional)</label><input id="h-to" list="h-people" value="${esc(pre.to || '')}" placeholder="e.g. Rohan"></div>
+    <div><label>Back on (optional)</label><input id="h-until" type="date"></div>
+  </div><datalist id="h-people">${people.map((p) => `<option value="${esc(p)}">`).join('')}</datalist>
+  <p><button id="h-go">✨ Generate handover pack</button></p></div><div id="h-out"></div>`;
+
+  guarded($('#h-go'), async () => {
+    const from = $('#h-from').value.trim(); const to = $('#h-to').value.trim(); const until = $('#h-until').value;
+    if (!from) throw new Error('Choose who is going on leave');
+    $('#h-out').innerHTML = '<div class="card muted">Gathering items and writing the handover…</div>';
+    const q = new URLSearchParams({ from, ...(to && { to }), ...(until && { until }) });
+    const r = await api('/handover?' + q);
+    if (r.empty) { $('#h-out').innerHTML = `<div class="card">${esc(r.message)}</div>`; return; }
+    let md = r.markdown;
+    $('#h-out').innerHTML = `<div class="card">
+      <div class="row"><strong class="grow">Handover pack for ${esc(from)}</strong>${aiTag(r)}<span class="chip">${r.totals.open} item${r.totals.open === 1 ? '' : 's'}</span><span class="chip">${r.totals.meetings} meeting${r.totals.meetings === 1 ? '' : 's'}</span>${r.totals.overdue ? `<span class="chip bad">${r.totals.overdue} overdue</span>` : ''}</div>
+      ${r.fallback ? `<p class="muted">AI unavailable (${esc(r.ai_error || 'unknown')}). Facts are from your workspace; the prose is template-based.</p>` : ''}
+      <div class="tabsw"><button class="small" id="t-prev">Preview</button><button class="small ghost" id="t-edit">Edit Markdown</button></div>
+      <div id="h-preview" class="md">${mdToHtml(md)}</div>
+      <textarea id="h-md" hidden spellcheck="false" style="min-height:420px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"></textarea>
+      <div class="row" style="margin-top:12px"><button id="h-dl">⬇ Download .md</button><button class="ghost" id="h-copy">Copy Markdown</button>
+        ${to ? `<button class="ghost" id="h-reassign">Reassign ${r.totals.open} item(s) to ${esc(to)}</button>` : ''}</div></div>`;
+    const show = (edit) => {
+      $('#h-preview').hidden = edit; $('#h-md').hidden = !edit;
+      $('#t-prev').classList.toggle('ghost', edit); $('#t-edit').classList.toggle('ghost', !edit);
+      if (edit) $('#h-md').value = md; else $('#h-preview').innerHTML = mdToHtml(md);
+    };
+    $('#t-prev').onclick = () => show(false); $('#t-edit').onclick = () => show(true);
+    $('#h-md').addEventListener('input', (e) => { md = e.target.value; });
+    $('#h-dl').onclick = () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+      a.download = `handover-${from.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${new Date().toISOString().slice(0, 10)}.md`;
+      a.click(); URL.revokeObjectURL(a.href);
+    };
+    $('#h-copy').onclick = () => { navigator.clipboard?.writeText(md); toast('Markdown copied'); };
+    if ($('#h-reassign')) guarded($('#h-reassign'), async () => {
+      if (!confirm(`Move all of ${from}'s open items to ${to}? Each move is recorded in the item history.`)) return;
+      const x = await api('/items/reassign', { method: 'POST', body: { from, to } });
+      toast(`${x.reassigned} item(s) reassigned to ${to}`); $('#h-reassign').hidden = true;
+    });
+  });
+  if (pre.from) $('#h-go').click();
+}
+
 // ---------- all items ----------
 async function viewItems() {
   const status = viewItems.status || '';
@@ -211,7 +403,7 @@ async function viewRadar() {
     <div class="card"><h3 style="margin-top:0">Cover for someone on leave</h3>
       <label>From</label><input id="r-from" placeholder="Person going on leave">
       <label>To</label><input id="r-to" placeholder="Person taking over">
-      <p><button id="r-go">Reassign all their open items</button></p>
+      <p class="row"><button id="r-go">Reassign all their open items</button><button class="ghost" id="r-pack">📄 Handover pack…</button></p>
       <p class="muted">Every move is recorded in each item's history.</p></div>
   </div>
   <div class="card"><h3 style="margin-top:0">Items most likely to fall through</h3>
@@ -219,6 +411,7 @@ async function viewRadar() {
     ${r.at_risk_items.map((i) => `<tr data-id="${i.id}"><td>${esc(i.title)}<br><span class="muted">${esc(i.meeting_title)}</span></td><td>${esc(i.owner) || '<span class="overdue">unassigned</span>'}</td>
       <td>${i.overdueDays ? `<span class="overdue">${i.overdueDays}d</span>` : '—'}</td><td>${i.carries}×</td><td><strong>${i.risk}</strong></td><td><button class="small act-nudge">Nudge</button></td></tr>`).join('')}
     </tbody></table></div>`;
+  $('#r-pack').onclick = () => { viewHandover.pre = { from: $('#r-from').value, to: $('#r-to').value }; go('handover'); };
   guarded($('#r-go'), async () => { const x = await api('/items/reassign', { method: 'POST', body: { from: $('#r-from').value, to: $('#r-to').value } }); toast(`${x.reassigned} item(s) reassigned`); go('radar'); });
   wireItemActions(r.at_risk_items.map((i) => ({ ...i })), () => go('radar'));
 }
@@ -236,4 +429,4 @@ async function viewKb() {
   app.querySelectorAll('.k-del').forEach((b) => guarded(b, async () => { if (confirm('Delete this document?')) { await api('/kb/' + b.dataset.id, { method: 'DELETE' }); go('kb'); } }));
 }
 
-go('meetings');
+go('dashboard');
