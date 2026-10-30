@@ -2,7 +2,7 @@
 process.env.DB_PATH = require('path').join(require('os').tmpdir(), `handoffhub-test-${Date.now()}.db`);
 process.env.LOG_DIR = require('path').join(require('os').tmpdir(), `handoffhub-logs-${Date.now()}`);
 process.env.SEED = 'false';
-delete process.env.GEMINI_API_KEY;
+process.env.GEMINI_API_KEY = ''; 
 process.env.DOTENV_CONFIG_QUIET = 'true';
 
 const assert = require('assert');
